@@ -1,0 +1,17 @@
+{
+  "name": "Trivia de la Reforma",
+  "short_name": "Trivia Reforma",
+  "description": "Juego de preguntas sobre la Reforma protestante, sus personajes, doctrinas y su historia en España.",
+  "lang": "es",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#eef0ea",
+  "theme_color": "#2b4a7e",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

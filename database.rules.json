@@ -1,0 +1,35 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "games": {
+      "$code": {
+        ".read": "auth != null",
+        ".write": "auth != null && (data.exists() ? data.child('host').val() === auth.uid : newData.child('host').val() === auth.uid)",
+        ".validate": "$code.matches(/^[A-Z]{4}$/)",
+        "host": { ".validate": "newData.isString()" },
+        "created": { ".validate": "newData.isNumber()" },
+        "state": { ".validate": "newData.hasChildren(['ph'])" },
+        "scores": {
+          "$uid": { ".validate": "newData.hasChildren(['n', 's'])" }
+        },
+        "players": {
+          "$uid": {
+            ".write": "auth != null && auth.uid === $uid && data.parent().parent().child('host').exists()",
+            ".validate": "newData.hasChildren(['name'])",
+            "name": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 16" },
+            "ans": {
+              ".validate": "newData.hasChildren(['q', 'c', 'at'])",
+              "q": { ".validate": "newData.isNumber()" },
+              "c": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 3" },
+              "at": { ".validate": "newData.val() === now" },
+              "$other": { ".validate": false }
+            },
+            "$other": { ".validate": false }
+          }
+        },
+        "$other": { ".validate": false }
+      }
+    }
+  }
+}
