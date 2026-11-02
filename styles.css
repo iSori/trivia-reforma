@@ -76,6 +76,7 @@ button.opt:hover:not([disabled]){border-color:var(--woad)}
 .mp p{margin:0}
 .code{font-family:var(--label);font-weight:700;font-size:3.4rem;letter-spacing:.18em;color:var(--woad);line-height:1;font-variant-numeric:tabular-nums}
 .chips{display:flex;flex-wrap:wrap;gap:8px;list-style:none;margin:0;padding:0}
+.chips li.off{color:var(--muted);border-style:dashed}
 .chips li{border:1px solid var(--rule);border-radius:999px;padding:4px 12px;font-size:.95rem;background:var(--paper)}
 .timer{position:relative;height:28px;border:1px solid var(--rule);border-radius:6px;overflow:hidden;background:var(--paper)}
 .timer i{position:absolute;inset:0 auto 0 0;background:var(--woad-soft);transition:width .25s linear}

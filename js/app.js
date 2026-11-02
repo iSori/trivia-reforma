@@ -125,12 +125,40 @@ const fbError = e => e && e.code === "noconfig"
 let MP = {err:"", role:null, code:"", tick:null, off:[]};
 let H = null, P = null;
 
+// La sesión se guarda en el dispositivo para volver a la partida si el móvil
+// cambia de app, se bloquea o recarga la página.
+const SESS = "trivia-reforma-sesion";
+const saveSess = o => { try { o ? localStorage.setItem(SESS, JSON.stringify(o)) : localStorage.removeItem(SESS); } catch (e) {} };
+const loadSess = () => { try { return JSON.parse(localStorage.getItem(SESS) || "null"); } catch (e) { return null; } };
+const saveHost = () => { if (MP.role === "host" && H) saveSess({role:"host", code:MP.code, H, t:Date.now()}); };
+
+// Marca a alguien como conectado o desconectado sin borrar sus datos.
+function watchOnline(ref, field) {
+  const {D} = FB;
+  MP.off.push(D.onValue(D.ref(FB.db, ".info/connected"), s => {
+    if (s.val() !== true) return;
+    D.onDisconnect(ref).update({[field]: false}).then(() => D.update(ref, {[field]: true})).catch(() => {});
+  }));
+}
+
+// Mantiene la pantalla encendida durante la partida, si el navegador lo permite.
+let wake = null;
+async function keepAwake(on) {
+  try {
+    if (on && !wake && "wakeLock" in navigator && document.visibilityState === "visible") {
+      wake = await navigator.wakeLock.request("screen");
+      wake.addEventListener("release", () => { wake = null; });
+    } else if (!on && wake) { const w = wake; wake = null; await w.release(); }
+  } catch (e) {}
+}
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && MP.role) keepAwake(true); });
+
 const cleanName = v => String(v || "").replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g, "").trim().slice(0, 16);
 function mpCode() { const A = "ABCDEFGHJKLMNPQRSTUVWXYZ"; let c = ""; for (let i = 0; i < 4; i++) c += A[Math.floor(Math.random() * A.length)]; return c; }
 const gameRef = (code, sub) => FB.D.ref(FB.db, "games/" + code + (sub ? "/" + sub : ""));
 
 function mpStop() {
-  clearInterval(MP.tick);
+  clearInterval(MP.tick); keepAwake(false);
   MP.off.forEach(f => { try { f(); } catch (e) {} });
   MP = {err:MP.err, role:null, code:"", tick:null, off:[]};
 }
@@ -156,6 +184,8 @@ async function hostStart() {
   try { await fb(); } catch (e) { MP.err = fbError(e); render(); return; }
   mpStop();
   const {D} = FB;
+  const old = loadSess();
+  if (old && old.role === "host" && old.code) D.remove(gameRef(old.code)).catch(() => {});
   let code = null;
   for (let tries = 0; tries < 5 && !code; tries++) {
     const c = mpCode();
@@ -163,10 +193,18 @@ async function hostStart() {
     if (res && res.committed) code = c;
   }
   if (!code) { MP.err = "No se pudo crear la partida. Inténtalo de nuevo."; render(); return; }
-  D.onDisconnect(gameRef(code)).remove();
   MP.role = "host"; MP.code = code;
   const qs = shuffle(pool(S.cat)).slice(0, ROUND).map(q => { const o = shuffle([q[4], ...q[5]]); return {t:q[3], o, r:o.indexOf(q[4]), y:q[2], w:q[6], lv:q[1]}; });
   H = {qs, qi:-1, ph:"lobby", deadline:0, ans:{}, scores:{}, counts:[], players:{}, cat:S.cat, lvl:S.lvl};
+  saveHost();
+  hostListen(code);
+  S.screen = "mp-host"; render(); scrollTo(0, 0);
+}
+const onlineIds = () => Object.keys(H.players).filter(id => H.players[id].online !== false);
+function hostListen(code) {
+  const {D} = FB;
+  watchOnline(gameRef(code), "hostOn");
+  keepAwake(true);
   MP.off.push(D.onValue(gameRef(code, "players"), snap => {
     H.players = snap.val() || {};
     for (const [uid, p] of Object.entries(H.players)) {
@@ -176,11 +214,21 @@ async function hostStart() {
       if (H.ph === "q" && a && a.q === H.qi && Number.isInteger(a.c) && a.c >= 0 && a.c < 4 && !H.ans[uid] && a.at <= H.deadline + 500)
         H.ans[uid] = {c:a.c, at:a.at};
     }
-    const ids = Object.keys(H.players);
+    saveHost();
+    const ids = onlineIds();
     if (H.ph === "q" && ids.length && ids.every(id => H.ans[id])) hostReveal(); else render();
   }));
   MP.tick = setInterval(() => { if (H && H.ph === "q") { paintTimer(H.deadline); if (FB.now() >= H.deadline) hostReveal(); } }, 250);
-  S.screen = "mp-host"; render(); scrollTo(0, 0);
+}
+async function hostResume(sess) {
+  const {D} = FB;
+  const g = await D.get(gameRef(sess.code)).then(x => x.val()).catch(() => null);
+  if (!g || g.host !== FB.uid || !sess.H) return false;
+  mpStop();
+  MP.role = "host"; MP.code = sess.code; H = sess.H; H.players = g.players || {};
+  hostListen(sess.code);
+  hostWrite();
+  S.screen = "mp-host"; return true;
 }
 function hostWrite() {
   const q = H.qs[H.qi];
@@ -188,6 +236,7 @@ function hostWrite() {
   if (q && (H.ph === "q" || H.ph === "rev")) st.q = {t:q.t, o:q.o, y:q.y, lv:q.lv};
   if (H.ph === "q") st.deadline = H.deadline;
   if (H.ph === "rev") { st.r = q.r; st.w = q.w; st.cnt = H.counts; }
+  saveHost();
   return FB.D.update(gameRef(MP.code), {state:st, scores:H.scores}).catch(() => {});
 }
 function hostNext() {
@@ -210,13 +259,14 @@ function hostReveal() {
 }
 async function hostEnd() {
   const code = MP.code;
-  mpStop(); H = null;
+  mpStop(); H = null; saveSess(null);
   if (code && FB) { try { await FB.D.onDisconnect(gameRef(code)).cancel(); await FB.D.remove(gameRef(code)); } catch (e) {} }
 }
 function hostView() {
   const L = "ABCD", q = H.qs[H.qi], cat = CATS.find(c => c.id === H.cat);
-  const names = Object.values(H.players).map(p => cleanName(p.name)).filter(Boolean);
-  const nAns = Object.keys(H.players).filter(id => H.ans[id]).length;
+  const list = Object.values(H.players).filter(p => cleanName(p.name)).map(p => ({n:cleanName(p.name), off:p.online === false}));
+  const names = list.map(p => p.n);
+  const on = onlineIds(), nAns = on.filter(id => H.ans[id]).length, nOff = list.filter(p => p.off).length;
   const head = `<div class="eyebrow"><span>Partida ${MP.code} · Anfitrión</span><span>${H.ph === "lobby" ? cat.name : H.ph === "end" ? "Final" : `Pregunta ${H.qi + 1} de ${H.qs.length}`}</span></div>`;
   const opts = cls => `<div class="opts">${q.o.map((o, k) => `<div class="opt ${cls(k)}"><span class="k">${L[k]}</span><span>${esc(o)}</span>${H.ph === "rev" ? `<span class="n">${H.counts[k]}</span>` : ""}</div>`).join("")}</div>`;
   if (H.ph === "lobby") return head + `
@@ -225,14 +275,14 @@ function hostView() {
     <div class="code">${MP.code}</div>
     <p class="muted">Abre este juego en cada móvil (${esc(location.host + location.pathname)}), pulsa «Unirme con código» y escribe el código. ${cat.name} · ${LVLS[H.lvl]} · ${H.qs.length} preguntas de ${DUR / 1000} segundos.</p>
     <h2>${names.length ? `${names.length} ${names.length === 1 ? "jugador" : "jugadores"}` : "Esperando jugadores…"}</h2>
-    ${names.length ? `<ul class="chips">${names.map(n => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
+    ${list.length ? `<ul class="chips">${list.map(p => `<li class="${p.off ? "off" : ""}">${esc(p.n)}${p.off ? " · sin conexión" : ""}</li>`).join("")}</ul>` : ""}
     <div class="row"><button class="btn" id="mp-start" ${names.length ? "" : "disabled"}>Empezar</button><button class="btn ghost" id="mp-quit">Cancelar</button></div>
   </section>`;
   if (H.ph === "q") return head + timerHTML(H.deadline) + `
   <section class="sheet">
     <span class="anno">Anno ${esc(q.y)}</span><h2>${esc(q.t)}</h2>
     ${opts(() => "")}
-    <p class="muted">Han respondido ${nAns} de ${names.length}.</p>
+    <p class="muted">Han respondido ${nAns} de ${on.length}.${nOff ? ` ${nOff} sin conexión.` : ""}</p>
     <button class="btn" id="mp-reveal">Mostrar respuesta</button>
   </section>`;
   if (H.ph === "rev") return head + `
@@ -259,27 +309,44 @@ async function joinStart(code, name) {
   const {D} = FB;
   const exists = await D.get(gameRef(code, "host")).then(s => s.exists()).catch(() => false);
   if (!exists) { P.err = "No hay ninguna partida abierta con ese código."; render(); return; }
-  try {
-    await D.set(gameRef(code, "players/" + FB.uid), {name});
-    D.onDisconnect(gameRef(code, "players/" + FB.uid)).remove();
-  } catch (e) { P.err = "No se pudo entrar en la partida. Inténtalo de nuevo."; render(); return; }
+  try { await D.set(gameRef(code, "players/" + FB.uid), {name}); }
+  catch (e) { P.err = "No se pudo entrar en la partida. Inténtalo de nuevo."; render(); return; }
+  playerListen(code, name);
+  render();
+}
+function playerListen(code, name) {
+  const {D} = FB;
   MP.role = "player"; MP.code = code;
+  saveSess({role:"player", code, name, t:Date.now()});
   Object.assign(P, {code, name, joined:true, st:null, scores:{}, my:null, myQ:-1, ended:false, err:""});
+  watchOnline(gameRef(code, "players/" + FB.uid), "online");
+  keepAwake(true);
   MP.off.push(D.onValue(gameRef(code), snap => {
     const g = snap.val();
-    if (!g) { P.ended = true; render(); return; }
+    if (!g) { P.ended = true; saveSess(null); keepAwake(false); render(); return; }
     const prev = P.st, st = g.state || {ph:"lobby"};
-    P.st = st; P.scores = g.scores || {}; P.count = Object.keys(g.players || {}).length;
+    P.st = st; P.scores = g.scores || {}; P.count = Object.keys(g.players || {}).length; P.hostOn = g.hostOn !== false;
     if (st.ph === "q" && st.qi !== P.myQ) { P.myQ = st.qi; P.my = null; }
+    const mine = g.players && g.players[FB.uid] && g.players[FB.uid].ans;
+    if (P.my == null && mine && mine.q === st.qi) P.my = mine.c;
     const changed = !prev || prev.ph !== st.ph || prev.qi !== st.qi;
     render(); if (changed) scrollTo(0, 0);
   }));
   MP.tick = setInterval(() => { if (P && P.st && P.st.ph === "q") paintTimer(P.st.deadline); }, 250);
-  render();
+}
+async function playerResume(sess) {
+  const {D} = FB;
+  const g = await D.get(gameRef(sess.code)).then(x => x.val()).catch(() => null);
+  if (!g || !g.host) return false;
+  try { await D.update(gameRef(sess.code, "players/" + FB.uid), {name:sess.name}); } catch (e) { return false; }
+  mpStop();
+  P = {code:sess.code, name:sess.name, err:""};
+  playerListen(sess.code, sess.name);
+  S.screen = "mp-player"; return true;
 }
 async function playerLeave() {
   const code = MP.code;
-  mpStop();
+  mpStop(); saveSess(null);
   if (code && FB) { try { await FB.D.onDisconnect(gameRef(code, "players/" + FB.uid)).cancel(); await FB.D.remove(gameRef(code, "players/" + FB.uid)); } catch (e) {} }
 }
 function playerView() {
@@ -293,6 +360,7 @@ function playerView() {
     ${P.err ? `<p class="warn">${esc(P.err)}</p>` : ""}
     <div class="row"><button class="btn" type="submit" ${P.busy ? "disabled" : ""}>Entrar</button><button class="btn ghost" type="button" id="mp-quit">Volver</button></div>
   </form>`;
+  const hostAway = P.hostOn === false && st && st.ph !== "end" ? `<p class="warn">El anfitrión se ha desconectado. La partida seguirá cuando vuelva.</p>` : "";
   if (P.ended) return head + `
   <section class="sheet mp">
     <h2>La partida ha terminado</h2>
@@ -303,6 +371,7 @@ function playerView() {
   <section class="sheet mp">
     <h2>Estás dentro</h2>
     <p class="muted">La partida empezará cuando el anfitrión la inicie. ${P.count ? `Hay ${P.count} ${P.count === 1 ? "jugador" : "jugadores"}.` : ""}</p>
+    ${hostAway}
     <div class="row"><button class="btn ghost" id="mp-quit">Salir</button></div>
   </section>`;
   if (st.ph === "q") {
@@ -312,6 +381,7 @@ function playerView() {
     <span class="anno">Anno ${esc(st.q.y)}</span><h2>${esc(st.q.t)}</h2>
     <div class="opts">${st.q.o.map((o, k) => `<button class="opt ${P.my === k ? "picked" : ""}" data-pick="${k}" ${P.my != null || late ? "disabled" : ""}><span class="k">${L[k]}</span><span>${esc(o)}</span></button>`).join("")}</div>
     ${P.my != null ? `<p class="muted">Respuesta enviada. Espera a que se acabe el tiempo.</p>` : late ? `<p class="muted">Se acabó el tiempo.</p>` : ""}
+    ${hostAway}
   </section>`;
   }
   const board = toBoard(P.scores), mine = board.findIndex(b => b[0] === me), entry = board[mine];
@@ -323,7 +393,7 @@ function playerView() {
     <div class="opts">${st.q.o.map((o, k) => `<div class="opt ${k === st.r ? "ok" : k === P.my ? "bad" : ""}"><span class="k">${L[k]}</span><span>${esc(o)}</span><span class="n">${st.cnt ? st.cnt[k] : ""}</span></div>`).join("")}</div>
     <p class="muted">${esc(st.w)}</p>
   </section>
-  <section class="sheet mp"><h2>${entry ? `Vas ${mine + 1}.º con ${entry[2]} puntos` : "Clasificación"}</h2>${boardHTML(board, me, 5)}</section>`;
+  <section class="sheet mp"><h2>${entry ? `Vas ${mine + 1}.º con ${entry[2]} puntos` : "Clasificación"}</h2>${boardHTML(board, me, 5)}${hostAway}</section>`;
   }
   return head + `
   <section class="sheet mp">
@@ -364,6 +434,7 @@ app.addEventListener("submit", async e => {
 function render() {
   if (S.screen === "mp-host" && !H) S.screen = "home";
   if (S.screen === "mp-player" && !P) S.screen = "home";
+  if (S.screen === "mp-resume") { app.innerHTML = `<section class="sheet mp"><h2>Volviendo a la partida…</h2><p class="muted">Recuperando tu sesión.</p></section>`; return; }
   app.innerHTML = S.screen === "home" ? home() : S.screen === "quiz" ? quiz() : S.screen === "mp-host" ? hostView() : S.screen === "mp-player" ? playerView() : result();
   if (S.screen === "quiz") {
     const f = app.querySelector(S.picked != null ? "#next" : ".opt");
@@ -392,9 +463,18 @@ app.addEventListener("click", e => {
   }
 });
 
-// Aviso antes de cerrar la pestaña del anfitrión: cerrar borra la partida
-addEventListener("beforeunload", e => { if (MP.role === "host" && H && H.ph !== "end") { e.preventDefault(); e.returnValue = ""; } });
+// Al abrir la web, vuelve a la partida guardada si sigue abierta (máximo 12 horas).
+async function resume() {
+  const sess = loadSess();
+  if (!sess || !configured() || Date.now() - (sess.t || 0) > 12 * 3600e3) { saveSess(null); return; }
+  S.screen = "mp-resume"; render();
+  let ok = false;
+  try { await fb(); ok = sess.role === "host" ? await hostResume(sess) : await playerResume(sess); } catch (e) { ok = false; }
+  if (!ok) { saveSess(null); S.screen = "home"; MP.err = "La partida anterior ya no está abierta."; }
+  render(); scrollTo(0, 0);
+}
 
 render();
+resume();
 
 if ("serviceWorker" in navigator) addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));

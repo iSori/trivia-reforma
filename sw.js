@@ -1,6 +1,6 @@
 // Service worker: guarda el juego para que el modo individual funcione sin conexión.
 // Cada vez que publiques cambios, sube el número de versión para que los móviles descarguen lo nuevo.
-const VERSION = "trivia-reforma-v1";
+const VERSION = "trivia-reforma-v2";
 const FILES = [
   "./", "index.html", "styles.css", "manifest.webmanifest",
   "js/app.js", "js/preguntas.js", "js/firebase-config.js",
